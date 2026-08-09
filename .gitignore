@@ -1,0 +1,26 @@
+# python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+dist/
+
+# c++ / cmake
+build/
+*.o
+*.obj
+*.exe
+*.dll
+*.a
+
+# captures, keys, dumps. never commit these
+*.hex
+*.bin
+*.pcap
+*.pcapng
+*keys*.txt
+*.seed
+
+# os
+.DS_Store
+Thumbs.db
