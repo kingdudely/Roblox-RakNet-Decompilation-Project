@@ -50,7 +50,7 @@ def test_current_rbx_open_request1_shape():
         assert request1[0] == ID_RBX_OPEN_REQUEST_1
         assert request1[1:17] == MAGIC
         assert request1[17] == RBX_OPEN_PROTOCOL
-        assert request1[18] == 0  # Rupp opt-in disabled.
+        assert request1[18] == 1  # Rupp opt-in enabled by the canonical client.
         assert request1[19:] == bytes(len(request1) - 19)
     finally:
         client.close()
