@@ -282,6 +282,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--show-ephemeral", action="store_true", help="print EphemeralEarlyPubKey and decoded public bytes for diagnosis")
     parser.add_argument("--probe", action="store_true", help="send a RakNet unconnected ping")
     parser.add_argument("--handshake", action="store_true", help="run standard RakNet connection negotiation")
+    parser.add_argument("--udp-trace", action="store_true", help="run the real UDP handshake and dump raw post-handshake packets")
     args = parser.parse_args(argv)
 
     cookie = read_cookie()
@@ -316,7 +317,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  base64 decode failed: {exc}")
 
     if not result.endpoints:
-        return 0 if not (args.probe or args.handshake) else 2
+        return 0 if not (args.probe or args.handshake or args.udp_trace) else 2
 
     if args.probe:
         client = RakNetClient(*result.endpoints[0])
@@ -331,10 +332,10 @@ def main(argv: list[str] | None = None) -> int:
         finally:
             client.close()
 
-    if args.handshake:
+    if args.handshake or args.udp_trace:
         client = RakNetClient(*result.endpoints[0])
         try:
-            hs = client.connect()
+            hs = client.connect(trace=args.udp_trace)
             print("RakNet handshake: OK")
             print(f"  server GUID: 0x{hs.server_guid:016x}")
             print(f"  MTU: {hs.mtu}")
