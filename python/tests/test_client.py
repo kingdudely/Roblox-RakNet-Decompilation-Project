@@ -6,7 +6,16 @@ import hashlib
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 
 from rbxraknet.client import make_client_public_key_data
-from rbxraknet.raknet import MAGIC, RakNetClient
+from rbxraknet.raknet import (
+    MAGIC,
+    ID_RBX_OPEN_REPLY_1,
+    ID_RBX_OPEN_REQUEST_1,
+    ID_RBX_OPEN_REQUEST_2,
+    ID_RBX_OPEN_REPLY_2,
+    RBX_OPEN_PROTOCOL,
+    RakNetClient,
+    REQUEST1_LEN,
+)
 
 
 def test_x25519_and_sha512_shape():
@@ -19,6 +28,7 @@ def test_x25519_and_sha512_shape():
     a = local.exchange(peer.public_key())
     b = peer.exchange(local.public_key())
     assert a == b
+
     digest = hashlib.sha512(a + lp + pp).digest()
 
     assert len(a) == 32
@@ -32,15 +42,21 @@ def test_client_public_key_data():
     assert base64.b64encode(key).decode() in text
 
 
-def test_raknet_packet_shapes():
+def test_current_rbx_open_request1_shape():
     client = RakNetClient("127.0.0.1", 1234)
     try:
-        assert client.build_unconnected_ping()[0] == 0x01
-        request1 = client._open_request_1()
-        assert len(request1) == client.mtu
+        request1 = client.build_open_request_1()
+        assert len(request1) == REQUEST1_LEN
+        assert request1[0] == ID_RBX_OPEN_REQUEST_1
         assert request1[1:17] == MAGIC
-        request2 = client._open_request_2("127.0.0.1", 1234, client.mtu)
-        assert request2[0] == 0x07
-        assert request2[1:17] == MAGIC
+        assert request1[17] == RBX_OPEN_PROTOCOL
+        assert request1[18] == 0  # Rupp opt-in disabled.
+        assert request1[19:] == bytes(len(request1) - 19)
     finally:
         client.close()
+
+
+def test_current_packet_ids():
+    assert ID_RBX_OPEN_REPLY_1 == 0x7E
+    assert ID_RBX_OPEN_REQUEST_2 == 0x78
+    assert ID_RBX_OPEN_REPLY_2 == 0x7D
