@@ -210,6 +210,8 @@ class RobloxJoinClient:
             )
 
         response = json.loads(raw)
+        print("GameJoin response JSON:")
+        print(json.dumps(response, indent=2, sort_keys=True, ensure_ascii=False))
         if response.get("status") not in (None, 2):
             raise RuntimeError(
                 f"GameJoin status={response.get('status')}: "
