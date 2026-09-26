@@ -192,9 +192,17 @@ class RobloxJoinClient:
         if not peer_encoded:
             raise RuntimeError("joinScript has no EphemeralEarlyPubKey")
 
-        peer_public = _b64decode(str(peer_encoded))
+        peer_encoded = str(peer_encoded)
+        peer_public = _b64decode(peer_encoded)
+
+        # Always expose the exact GameJoin value when the shape is unexpected.
+        # This is a public key field, not the account cookie or authentication ticket.
         if len(peer_public) != 32:
-            raise RuntimeError(f"EphemeralEarlyPubKey is {len(peer_public)} bytes, expected 32")
+            raise RuntimeError(
+                "EphemeralEarlyPubKey decoded unexpectedly: "
+                f"{len(peer_public)} bytes (expected 32); "
+                f"base64={peer_encoded}; hex={peer_public.hex()}"
+            )
 
         shared = private.exchange(X25519PublicKey.from_public_bytes(peer_public))
         digest = hashlib.sha512(shared + local_public + peer_public).digest()
