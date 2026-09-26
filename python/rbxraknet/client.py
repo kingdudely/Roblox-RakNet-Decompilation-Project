@@ -281,7 +281,7 @@ def print_join_summary(result: JoinResult) -> None:
 
     print(f"X25519 join stage: OK ({len(result.shared_secret)} bytes)")
     print(f"SHA-512 join transcript: OK ({len(result.sha512_digest)} bytes)")
-    print("RbxOpenRequest1 Rupp opt-in: disabled")
+    print("RbxOpenRequest1 Rupp opt-in: enabled (0x01)")
     print("SessionCrypto Request2: not implemented yet")
 
 
