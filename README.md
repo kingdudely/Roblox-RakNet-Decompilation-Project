@@ -47,13 +47,9 @@ padding      zeroes
 
 The magic is stored in `xmmword_64E2A50`.
 
-The real client normally sets the Rupp opt-in byte to `1`, but `sub_28979D0` explicitly handles the `0` case and logs:
+The real client sets the Rupp opt-in byte to `1` in `sub_2897560`.
 
-```
-Client did not opt in to receiving Rupp headers. Omitting Rupp header.
-```
-
-The Python client therefore sends `0` at byte 18. This disables the server's Rupp response-header opt-in path.
+`sub_28979D0` also contains an explicit `0` path that omits the Rupp response header, but the current Python implementation matches the canonical client and sends `1`.
 
 The constructor is called with `MTU - 40`; for the current default MTU of 1492 this makes the UDP payload 1452 bytes.
 
