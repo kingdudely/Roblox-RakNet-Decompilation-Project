@@ -31,7 +31,7 @@ AUTH_TICKET_URL = "https://auth.roblox.com/v1/authentication-ticket"
 JOIN_GAME_URL = "https://gamejoin.roblox.com/v1/join-game"
 JOIN_INSTANCE_URL = "https://gamejoin.roblox.com/v1/join-game-instance"
 SERVERS_URL = "https://games.roblox.com/v1/games/{}/servers/0?sortOrder=2&excludeFullGames=false&limit=10"
-DEFAULT_KEY_VERSION = 2
+DEFAULT_KEY_VERSION = 5
 
 
 def _b64decode(value: str) -> bytes:
@@ -236,6 +236,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--place-id", type=int, required=True)
     parser.add_argument("--job-id")
     parser.add_argument("--key-version", type=int, default=DEFAULT_KEY_VERSION)
+    parser.add_argument("--show-ephemeral", action="store_true", help="print EphemeralEarlyPubKey and decoded public bytes for diagnosis")
     parser.add_argument("--probe", action="store_true", help="send a RakNet unconnected ping")
     parser.add_argument("--handshake", action="store_true", help="run standard RakNet connection negotiation")
     args = parser.parse_args(argv)
@@ -256,6 +257,20 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     print_join_summary(result)
+
+    if args.show_ephemeral:
+        encoded = str(result.join_script.get("EphemeralEarlyPubKey", ""))
+        print("EphemeralEarlyPubKey (server response):")
+        print(f"  {encoded}")
+        try:
+            raw = _b64decode(encoded)
+            print(f"  decoded length: {len(raw)} bytes")
+            print(f"  decoded hex: {raw.hex()}")
+            if len(raw) >= 3:
+                print(f"  first 3 bytes: {raw[:3].hex()}")
+                print(f"  last 3 bytes:  {raw[-3:].hex()}")
+        except Exception as exc:
+            print(f"  base64 decode failed: {exc}")
 
     if not result.endpoints:
         return 0 if not (args.probe or args.handshake) else 2
