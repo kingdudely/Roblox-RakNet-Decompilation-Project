@@ -1,11 +1,7 @@
-"""Roblox's current offline RakNet-style connection handshake.
+"""Roblox current pre-auth RakNet-style connection handshake.
 
-This is not vanilla RakNet connection negotiation. The current Roblox client uses
-RbxOpenRequest1/Reply1 (0x7B/0x7E) followed by encrypted RbxOpenRequest2/Reply2
-(0x78/0x7D).
-
-The Request2 serializer and SessionCrypto state machine are still being completed,
-so this module currently brings the connection up only through Reply1.
+This module is intentionally limited to Request1/Reply1. Request1 field values are
+partially build-specific and must be verified against the target Android libroblox.so.
 """
 
 from __future__ import annotations
@@ -22,6 +18,7 @@ ID_RBX_OPEN_REPLY_2 = 0x7D
 
 RBX_OPEN_PROTOCOL = 5
 DEFAULT_MTU = 1492
+DEFAULT_RUPP_OPT_IN = 0
 REQUEST1_LEN = DEFAULT_MTU - 40
 
 
@@ -42,14 +39,33 @@ class RakNetClient:
         *,
         timeout: float = 4.0,
         mtu: int = DEFAULT_MTU,
+        rupp_opt_in: int = DEFAULT_RUPP_OPT_IN,
+        local_port: int = 0,
     ):
         self.endpoint = (host, int(port))
         self.timeout = timeout
         self.mtu = int(mtu)
+        self.rupp_opt_in = int(rupp_opt_in)
         if self.mtu < 576:
             raise ValueError("MTU must be at least 576")
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        if self.rupp_opt_in not in (0, 1):
+            raise ValueError("rupp_opt_in must be 0 or 1")
+
+        infos = socket.getaddrinfo(
+            host,
+            int(port),
+            type=socket.SOCK_DGRAM,
+        )
+        if not infos:
+            raise OSError(f"could not resolve UDP endpoint {host}:{port}")
+        family, socktype, proto, _, sockaddr = infos[0]
+        self.family = family
+        self.sock = socket.socket(family, socktype, proto)
         self.sock.settimeout(timeout)
+        if local_port:
+            bind_host = "::" if family == socket.AF_INET6 else "0.0.0.0"
+            self.sock.bind((bind_host, int(local_port)))
+        self.endpoint = sockaddr
 
     def close(self) -> None:
         self.sock.close()
@@ -64,43 +80,35 @@ class RakNetClient:
         return data
 
     def build_open_request_1(self) -> bytes:
-        # sub_2897560 is called with MTU - 40. The serializer writes:
-        #   0x7B + 16-byte magic + protocol(5) + Rupp opt-in(1) + zero padding.
+        # Existing Windows IDA notes identify the constructor as being called
+        # with MTU - 40. This length is NOT yet independently confirmed on the
+        # Android x86-64 target.
         total = self.mtu - 40
-        prefix = bytes(
-            (ID_RBX_OPEN_REQUEST_1,)
-        ) + MAGIC + bytes((RBX_OPEN_PROTOCOL, 1))
+        prefix = bytes((ID_RBX_OPEN_REQUEST_1,)) + MAGIC + bytes((
+            RBX_OPEN_PROTOCOL,
+            self.rupp_opt_in,
+        ))
         if total < len(prefix):
             raise RakNetError("requested MTU is too small for RbxOpenRequest1")
         return prefix + bytes(total - len(prefix))
 
-    def probe(self) -> bytes | None:
-        """Send RbxOpenRequest1 and return the raw RbxOpenReply1, if any."""
-        self.sock.sendto(self.build_open_request_1(), self.endpoint)
-        try:
-            reply = self._recv()
-        except RakNetError:
-            return None
-        if reply[0] != ID_RBX_OPEN_REPLY_1:
-            return reply
-        if len(reply) < 17 or reply[1:17] != MAGIC:
-            raise RakNetError("RbxOpenReply1 has an invalid magic value")
-        return reply
-
     def connect(self, *, trace: bool = False) -> RbxOpenReply1:
         request1 = self.build_open_request_1()
         if trace:
+            local = self.sock.getsockname()
             print(
-                f"UDP -> RbxOpenRequest1 0x{ID_RBX_OPEN_REQUEST_1:02x} "
-                f"len={len(request1)} prefix={request1[:32].hex()}"
+                f"UDP -> {self.endpoint!r} from {local!r} "
+                f"RbxOpenRequest1=0x{ID_RBX_OPEN_REQUEST_1:02x} "
+                f"len={len(request1)} rupp_opt_in={self.rupp_opt_in} "
+                f"prefix={request1[:32].hex()}"
             )
         self.sock.sendto(request1, self.endpoint)
 
         reply = self._recv()
         if trace:
             print(
-                f"UDP <- packet 0x{reply[0]:02x} "
-                f"len={len(reply)} prefix={reply[:128].hex()}"
+                f"UDP <- packet=0x{reply[0]:02x} len={len(reply)} "
+                f"prefix={reply[:128].hex()}"
             )
 
         if reply[0] != ID_RBX_OPEN_REPLY_1:
@@ -110,7 +118,6 @@ class RakNetClient:
             )
         if len(reply) < 17 or reply[1:17] != MAGIC:
             raise RakNetError("malformed RbxOpenReply1")
-
         return RbxOpenReply1(raw=reply)
 
 
@@ -122,7 +129,7 @@ def _selftest() -> None:
         assert request1[0] == ID_RBX_OPEN_REQUEST_1
         assert request1[1:17] == MAGIC
         assert request1[17] == RBX_OPEN_PROTOCOL
-        assert request1[18] == 1
+        assert request1[18] == DEFAULT_RUPP_OPT_IN
         assert request1[19:] == bytes(len(request1) - 19)
         assert ID_RBX_OPEN_REPLY_1 == 0x7E
         assert ID_RBX_OPEN_REQUEST_2 == 0x78
