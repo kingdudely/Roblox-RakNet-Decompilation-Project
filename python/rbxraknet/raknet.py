@@ -10,7 +10,6 @@ so this module currently brings the connection up only through Reply1.
 
 from __future__ import annotations
 
-import os
 import socket
 from dataclasses import dataclass
 
@@ -66,9 +65,11 @@ class RakNetClient:
 
     def build_open_request_1(self) -> bytes:
         # sub_2897560 is called with MTU - 40. The serializer writes:
-        #   0x7B + 16-byte magic + protocol(5) + Rupp opt-in(0) + zero padding.
+        #   0x7B + 16-byte magic + protocol(5) + Rupp opt-in(1) + zero padding.
         total = self.mtu - 40
-        prefix = bytes((ID_RBX_OPEN_REQUEST_1,)) + MAGIC + bytes((RBX_OPEN_PROTOCOL, 0))
+        prefix = bytes(
+            (ID_RBX_OPEN_REQUEST_1,)
+        ) + MAGIC + bytes((RBX_OPEN_PROTOCOL, 1))
         if total < len(prefix):
             raise RakNetError("requested MTU is too small for RbxOpenRequest1")
         return prefix + bytes(total - len(prefix))
@@ -91,15 +92,15 @@ class RakNetClient:
         if trace:
             print(
                 f"UDP -> RbxOpenRequest1 0x{ID_RBX_OPEN_REQUEST_1:02x} "
-                f"len={len(request1)}"
+                f"len={len(request1)} prefix={request1[:32].hex()}"
             )
         self.sock.sendto(request1, self.endpoint)
 
         reply = self._recv()
         if trace:
             print(
-                f"UDP <- RbxOpenReply1 0x{reply[0]:02x} "
-                f"len={len(reply)} hex={reply[:128].hex()}"
+                f"UDP <- packet 0x{reply[0]:02x} "
+                f"len={len(reply)} prefix={reply[:128].hex()}"
             )
 
         if reply[0] != ID_RBX_OPEN_REPLY_1:
@@ -121,7 +122,7 @@ def _selftest() -> None:
         assert request1[0] == ID_RBX_OPEN_REQUEST_1
         assert request1[1:17] == MAGIC
         assert request1[17] == RBX_OPEN_PROTOCOL
-        assert request1[18] == 0
+        assert request1[18] == 1
         assert request1[19:] == bytes(len(request1) - 19)
         assert ID_RBX_OPEN_REPLY_1 == 0x7E
         assert ID_RBX_OPEN_REQUEST_2 == 0x78
