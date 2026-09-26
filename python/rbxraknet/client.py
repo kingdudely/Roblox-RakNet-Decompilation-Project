@@ -93,7 +93,7 @@ def get_authentication_ticket(cookie: str, csrf: str) -> str:
     ticket = headers.get("rbx-authentication-ticket")
     if not ticket:
         raise RuntimeError(
-            f"no RBX-Authentication-Ticket (HTTP {status}): {body.decode("utf-8", "replace")[:400]}"
+            f"no RBX-Authentication-Ticket (HTTP {status}): {body.decode('utf-8', 'replace')[:400]}"
         )
     return ticket
 
@@ -194,7 +194,7 @@ class RobloxJoinClient:
             body=json.dumps(body, separators=(",", ":")).encode(),
         )
         if status != 200:
-            raise RuntimeError(f"GameJoin failed (HTTP {status}): {raw.decode("utf-8", "replace")[:500]}")
+            raise RuntimeError(f"GameJoin failed (HTTP {status}): {raw.decode('utf-8', 'replace')[:500]}")
 
         response = json.loads(raw)
         if response.get("status") not in (None, 2):
@@ -223,15 +223,16 @@ class RobloxJoinClient:
 def print_join_summary(result: JoinResult) -> None:
     js = result.join_script
     print("joinScript: OK")
-    print(f"  PlaceId: {js.get("PlaceId", "?")}")
-    print(f"  GameId: {js.get("GameId", "?")}")
+    print(f"  PlaceId: {js.get('PlaceId', '?')}")
+    print(f"  GameId: {js.get('GameId', '?')}")
     print(f"  UDMUX endpoints: {len(result.endpoints)}")
     for endpoint in result.endpoints:
         print(f"    {endpoint[0]}:{endpoint[1]}")
     if result.server_endpoint:
         print(f"  MachineAddress:ServerPort: {result.server_endpoint[0]}:{result.server_endpoint[1]}")
     print(f"  ClientPort: {result.client_port or 0}")
-    print(f"  ClientTicket: {("present" if result.client_ticket else "missing")}")
+    ticket_state = "present" if result.client_ticket else "missing"
+    print(f"  ClientTicket: {ticket_state}")
     print(f"  X25519 shared secret: {len(result.shared_secret)} bytes")
     print(f"  SHA-512 post-ECDH digest: {len(result.sha512_digest)} bytes")
 
