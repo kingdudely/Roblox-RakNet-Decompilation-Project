@@ -239,6 +239,16 @@ def print_join_summary(result: JoinResult) -> None:
     print(f"  UDMUX endpoints: {len(result.endpoints)}")
     for endpoint in result.endpoints:
         print(f"    {endpoint[0]}:{endpoint[1]}")
+
+    # EphemeralEarlyPubKey is public session material; print the exact value
+    # and the decoded bytes so the join-script representation is observable.
+    encoded = str(js.get("EphemeralEarlyPubKey", ""))
+    decoded = result.peer_public_key
+    print("EphemeralEarlyPubKey:")
+    print(f"  base64: {encoded}")
+    print(f"  decoded length: {len(decoded)} bytes")
+    print(f"  decoded hex: {decoded.hex()}")
+
     print(f"X25519: OK ({len(result.shared_secret)} bytes)")
     print(f"SHA-512: OK ({len(result.sha512_digest)} bytes)")
     print("AEAD key split: unresolved")
