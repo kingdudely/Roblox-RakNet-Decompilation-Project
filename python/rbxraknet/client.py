@@ -41,7 +41,8 @@ def _b64decode(value: str) -> bytes:
 
 
 def _http(url: str, *, cookie: str | None = None, csrf: str | None = None,
-          ticket: str | None = None, method: str = "POST",
+          ticket: str | None = None, negotiation: bool = False,
+          method: str = "POST",
           body: bytes | None = None) -> tuple[int, dict[str, str], bytes]:
     headers = {
         "User-Agent": "Roblox/WinInet",
@@ -55,6 +56,7 @@ def _http(url: str, *, cookie: str | None = None, csrf: str | None = None,
         headers["X-CSRF-TOKEN"] = csrf
     if ticket:
         headers["RBX-Authentication-Ticket"] = ticket
+    if ticket or negotiation:
         headers["RBXAuthenticationNegotiation"] = "1"
     if body is not None:
         headers["Content-Type"] = "application/json"
@@ -83,6 +85,7 @@ def get_authentication_ticket(cookie: str, csrf: str) -> str:
         cookie=cookie,
         csrf=csrf,
         body=b"",
+        negotiation=True,
     )
     ticket = headers.get("rbx-authentication-ticket")
     if not ticket:
