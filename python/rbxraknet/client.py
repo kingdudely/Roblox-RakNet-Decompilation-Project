@@ -18,6 +18,7 @@ import json
 import os
 import sys
 import uuid
+from urllib.parse import unquote
 from dataclasses import dataclass
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -35,9 +36,12 @@ DEFAULT_KEY_VERSION = 5
 
 
 def _b64decode(value: str) -> bytes:
-    value = value.strip()
+    # GameJoin can return this base64 value inside a URL-escaped joinScript.
+    # Decode percent escapes first; do not use unquote_plus because '+' is valid
+    # inside ordinary base64.
+    value = unquote(value.strip())
     padded = value + "=" * (-len(value) % 4)
-    return base64.b64decode(padded, validate=False)
+    return base64.b64decode(padded, validate=True)
 
 
 def _http(url: str, *, cookie: str | None = None, csrf: str | None = None,
@@ -201,11 +205,16 @@ class RobloxJoinClient:
         # Always expose the exact GameJoin value when the shape is unexpected.
         # This is a public key field, not the account cookie or authentication ticket.
         if len(peer_public) != 32:
-            raise RuntimeError(
-                "EphemeralEarlyPubKey decoded unexpectedly: "
+            details = (
                 f"{len(peer_public)} bytes (expected 32); "
                 f"base64={peer_encoded}; hex={peer_public.hex()}"
             )
+            if len(peer_public) >= 32:
+                details += (
+                    f"; first32={peer_public[:32].hex()}"
+                    f"; last32={peer_public[-32:].hex()}"
+                )
+            raise RuntimeError("EphemeralEarlyPubKey decoded unexpectedly: " + details)
 
         shared = private.exchange(X25519PublicKey.from_public_bytes(peer_public))
         digest = hashlib.sha512(shared + local_public + peer_public).digest()
@@ -239,7 +248,20 @@ def print_join_summary(result: JoinResult) -> None:
 
 def read_cookie() -> str:
     cookie = os.environ.get("ROBLOSECURITY")
-    return cookie.strip() if cookie else getpass.getpass("ROBLOSECURITY: ").strip()
+    if cookie:
+        cookie = cookie.strip()
+        source = "environment"
+    else:
+        cookie = getpass.getpass("ROBLOSECURITY: ").strip()
+        source = "prompt"
+
+    if cookie:
+        # Confirm that input was captured without ever echoing the credential.
+        preview = cookie[:4] + "..." + cookie[-4:] if len(cookie) >= 8 else "*" * len(cookie)
+        print(f"ROBLOSECURITY captured ({source}): {preview} [length={len(cookie)}]")
+    else:
+        print("ROBLOSECURITY captured: EMPTY", file=sys.stderr)
+    return cookie
 
 
 def main(argv: list[str] | None = None) -> int:
