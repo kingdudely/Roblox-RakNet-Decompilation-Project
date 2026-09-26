@@ -124,11 +124,16 @@ class RakNetClient:
         except RakNetError:
             return None
 
-    def connect(self) -> HandshakeResult:
+    def connect(self, *, trace: bool = False) -> HandshakeResult:
         host, port = self.endpoint
 
-        self.sock.sendto(self._open_request_1(), self.endpoint)
+        request1 = self._open_request_1()
+        if trace:
+            print(f"UDP -> OPEN_CONNECTION_REQUEST_1 len={len(request1)}")
+        self.sock.sendto(request1, self.endpoint)
         reply1 = self._recv()
+        if trace:
+            print(f"UDP <- packet=0x{reply1[0]:02x} len={len(reply1)} hex={reply1[:64].hex()}")
         if reply1[0] != ID_OPEN_CONNECTION_REPLY_1:
             raise RakNetError(f"expected 0x06, got 0x{reply1[0]:02x}")
         if len(reply1) < 28 or reply1[1:17] != MAGIC:
@@ -139,18 +144,23 @@ class RakNetClient:
         reply_mtu = struct.unpack(">H", reply1[26:28])[0]
         mtu = min(self.mtu, reply_mtu or self.mtu)
 
-        self.sock.sendto(
-            self._open_request_2(host, port, mtu),
-            self.endpoint,
-        )
+        request2 = self._open_request_2(host, port, mtu)
+        if trace:
+            print(f"UDP -> OPEN_CONNECTION_REQUEST_2 len={len(request2)}")
+        self.sock.sendto(request2, self.endpoint)
         reply2 = self._recv()
+        if trace:
+            print(f"UDP <- packet=0x{reply2[0]:02x} len={len(reply2)} hex={reply2[:64].hex()}")
         if reply2[0] != ID_OPEN_CONNECTION_REPLY_2:
             raise RakNetError(f"expected 0x08, got 0x{reply2[0]:02x}")
         if len(reply2) < 1 + 16 + 8 + 7 + 2 + 1 or reply2[1:17] != MAGIC:
             raise RakNetError("malformed OPEN_CONNECTION_REPLY_2")
 
         use_encryption = bool(reply2[-1])
-        self.sock.sendto(self._connection_request(), self.endpoint)
+        request = self._connection_request()
+        if trace:
+            print(f"UDP -> CONNECTION_REQUEST len={len(request)} hex={request.hex()}")
+        self.sock.sendto(request, self.endpoint)
 
         deadline = time.monotonic() + self.timeout
         while time.monotonic() < deadline:
@@ -159,10 +169,18 @@ class RakNetClient:
             except RakNetError:
                 continue
             code = packet[0]
+            if trace:
+                print(f"UDP <- packet=0x{code:02x} len={len(packet)} hex={packet[:128].hex()}")
             if code == ID_CONNECTION_REQUEST_ACCEPTED:
-                return HandshakeResult(server_guid, mtu, use_encryption or use_security)
+                result = HandshakeResult(server_guid, mtu, use_encryption or use_security)
+                if trace:
+                    self._trace_post_handshake()
+                return result
             if code == ID_NEW_INCOMING_CONNECTION:
-                return HandshakeResult(server_guid, mtu, use_encryption or use_security)
+                result = HandshakeResult(server_guid, mtu, use_encryption or use_security)
+                if trace:
+                    self._trace_post_handshake()
+                return result
             if code in (
                 ID_ALREADY_CONNECTED,
                 ID_CONNECTION_BANNED,
@@ -172,6 +190,26 @@ class RakNetClient:
 
         raise RakNetError("timeout waiting for connection acceptance")
 
+
+
+    def _trace_post_handshake(self, seconds: float = 2.0) -> None:
+        """Observe raw packets immediately after RakNet accepts the connection."""
+        deadline = time.monotonic() + seconds
+        previous_timeout = self.sock.gettimeout()
+        try:
+            while time.monotonic() < deadline:
+                remaining = max(0.05, deadline - time.monotonic())
+                self.sock.settimeout(min(previous_timeout or remaining, remaining))
+                try:
+                    packet = self._recv()
+                except RakNetError:
+                    break
+                print(
+                    f"UDP <- post-handshake packet=0x{packet[0]:02x} "
+                    f"len={len(packet)} hex={packet[:128].hex()}"
+                )
+        finally:
+            self.sock.settimeout(previous_timeout)
 
 def _selftest() -> None:
     client = RakNetClient("127.0.0.1", 1234)
