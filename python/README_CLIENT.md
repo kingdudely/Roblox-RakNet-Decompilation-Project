@@ -33,12 +33,17 @@ Run the standard RakNet connection negotiation:
 
     python -m rbxraknet.client --place-id 12345 --handshake
 
+Trace the real UDP handshake and print raw packets immediately afterward:
+
+    python -m rbxraknet.client --place-id 12345 --udp-trace
+
 Run both:
 
     python -m rbxraknet.client --place-id 12345 --probe --handshake
 
-The cookie is read from ROBLOSECURITY or prompted with hidden input. It is
-never printed.
+The cookie is read from ROBLOSECURITY or prompted with hidden input. The client
+only prints a masked confirmation of the input length and endpoints; it does not
+print the full cookie.
 
 ## Current boundary
 
