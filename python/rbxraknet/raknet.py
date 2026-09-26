@@ -15,10 +15,10 @@ from dataclasses import dataclass
 MAGIC = bytes.fromhex("00ffff00fefefefefdfdfdfd12345678")
 
 ID_UNCONNECTED_PING = 0x01
-ID_OPEN_CONNECTION_REQUEST_1 = 0x05
-ID_OPEN_CONNECTION_REPLY_1 = 0x06
-ID_OPEN_CONNECTION_REQUEST_2 = 0x07
-ID_OPEN_CONNECTION_REPLY_2 = 0x08
+ID_OPEN_CONNECTION_REQUEST_1 = 0x7B
+ID_OPEN_CONNECTION_REPLY_1 = 0x7E
+ID_OPEN_CONNECTION_REQUEST_2 = 0x78
+ID_OPEN_CONNECTION_REPLY_2 = 0x7D
 ID_CONNECTION_REQUEST = 0x09
 ID_CONNECTION_REQUEST_ACCEPTED = 0x10
 ID_NEW_INCOMING_CONNECTION = 0x13
@@ -26,8 +26,20 @@ ID_ALREADY_CONNECTED = 0x12
 ID_CONNECTION_BANNED = 0x17
 ID_INCOMPATIBLE_PROTOCOL = 0x19
 
-DEFAULT_PROTOCOL = 11
+DEFAULT_PROTOCOL = 5
 DEFAULT_MTU = 1492
+
+# Roblox's custom open-connection packets carry the regular RakNet fields plus
+# these client capability fields. These constants come from the public
+# raknet-dissector implementation of the Roblox handshake.
+CAPABILITY_ROBLOX = (
+    (0x3E | 0x80)       # CapabilityBasic
+    | 0x40              # CapabilityServerCopiesPlayerGui3
+    | 0x400             # CapabilityIHasMinDistToUnstreamed
+    | 0x800             # CapabilityReplicateLuau
+    | 0x2000             # CapabilityVersionedIDSync
+)
+SUPPORTED_VERSION = 0
 
 
 class RakNetError(RuntimeError):
@@ -106,15 +118,21 @@ class RakNetClient:
             + _ipv4_address(host, port)
             + struct.pack(">H", mtu)
             + struct.pack(">Q", self.guid)
+            + struct.pack(">I", SUPPORTED_VERSION)
+            + struct.pack(">Q", CAPABILITY_ROBLOX)
         )
 
     def _connection_request(self) -> bytes:
         now_ms = int(time.time() * 1000)
+        # The retail Roblox client uses a non-empty connection password on this
+        # pre-authenticated RakNet path.
+        password = bytes.fromhex("374f5e116c45")
         return (
             bytes([ID_CONNECTION_REQUEST])
             + struct.pack(">Q", self.guid)
             + struct.pack(">Q", now_ms)
             + b"\x00"  # useSecurity=false
+            + password
         )
 
     def probe(self) -> bytes | None:
@@ -135,7 +153,7 @@ class RakNetClient:
         if trace:
             print(f"UDP <- packet=0x{reply1[0]:02x} len={len(reply1)} hex={reply1[:64].hex()}")
         if reply1[0] != ID_OPEN_CONNECTION_REPLY_1:
-            raise RakNetError(f"expected 0x06, got 0x{reply1[0]:02x}")
+            raise RakNetError(f"expected 0x7e, got 0x{reply1[0]:02x}")
         if len(reply1) < 28 or reply1[1:17] != MAGIC:
             raise RakNetError("malformed OPEN_CONNECTION_REPLY_1")
 
@@ -152,7 +170,7 @@ class RakNetClient:
         if trace:
             print(f"UDP <- packet=0x{reply2[0]:02x} len={len(reply2)} hex={reply2[:64].hex()}")
         if reply2[0] != ID_OPEN_CONNECTION_REPLY_2:
-            raise RakNetError(f"expected 0x08, got 0x{reply2[0]:02x}")
+            raise RakNetError(f"expected 0x7d, got 0x{reply2[0]:02x}")
         if len(reply2) < 1 + 16 + 8 + 7 + 2 + 1 or reply2[1:17] != MAGIC:
             raise RakNetError("malformed OPEN_CONNECTION_REPLY_2")
 
@@ -219,9 +237,11 @@ def _selftest() -> None:
         request1 = client._open_request_1()
         assert len(request1) == DEFAULT_MTU
         assert request1[1:17] == MAGIC
+        assert request1[0] == ID_OPEN_CONNECTION_REQUEST_1
         request2 = client._open_request_2("127.0.0.1", 1234, DEFAULT_MTU)
         assert request2[0] == ID_OPEN_CONNECTION_REQUEST_2
         assert request2[1:17] == MAGIC
+        assert len(request2) == 46
     finally:
         client.close()
     print("[raknet] selftest OK")
