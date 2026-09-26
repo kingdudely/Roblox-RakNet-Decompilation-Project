@@ -174,7 +174,10 @@ class RakNetClient:
         if len(reply2) < 1 + 16 + 8 + 7 + 2 + 1 or reply2[1:17] != MAGIC:
             raise RakNetError("malformed OPEN_CONNECTION_REPLY_2")
 
-        use_encryption = bool(reply2[-1])
+        # Roblox's custom OPEN_CONNECTION_REPLY_2 layout:
+        #   id | magic | server GUID | external address | MTU | useSecurity
+        #      | supportedVersion(u32) | capabilities(u64)
+        use_encryption = bool(reply2[34])
         request = self._connection_request()
         if trace:
             print(f"UDP -> CONNECTION_REQUEST len={len(request)} hex={request.hex()}")
