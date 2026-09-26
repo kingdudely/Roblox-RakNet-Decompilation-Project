@@ -3,7 +3,15 @@
 The immediate goal is NOT Request2 or the KDF. The immediate goal is to reproduce the exact first
 RbxOpenRequest1 datagram emitted by the Android x86-64 client.
 
-## A. Find the constructor from the magic
+## A. Fastest route: break on the UDP send
+
+Before reversing the serializer, catch the exact packet the Android client emits. On Android x86-64 the native ABI is SysV AMD64, so a normal `sendto(fd, buf, len, flags, addr, addrlen)` call has `RDI=fd`, `RSI=buf`, `RDX=len`, `RCX=flags`, `R8=addr`, and `R9=addrlen`.
+
+In IDA, import `sendto`/`__sendto_chk` if present, then put a breakpoint on the call reached by the Roblox networking code. When it triggers, dump `RDX` bytes from `RSI`, decode the `sockaddr` at `R8`, and record the local socket with the file descriptor. Also breakpoint `bind` if you need to determine whether the client uses the joinScript `ClientPort`.
+
+The first thing we need is one real retail packet from this breakpoint. It immediately answers packet length, byte 18, destination, and source-port questions.
+
+## B. Find the constructor from the magic
 
 Search for the 16-byte byte sequence:
 
@@ -14,7 +22,7 @@ If Hex-Rays has split the constant into two loads, search the dword/qword fragme
 
 Once found, rename it `rbx_open_request1_android` and inspect its callers.
 
-## B. Record the exact serialized layout
+## C. Record the exact serialized layout
 
 For the function itself, write down a table:
 
@@ -30,7 +38,7 @@ Do not assume offset 18 is Rupp until you see the store.
 
 Also capture the final write/cursor and the returned packet length.
 
-## C. Trace the caller
+## D. Trace the caller
 
 At every call site of the constructor, record:
 - the value passed as the output-length/MTU argument;
@@ -41,7 +49,7 @@ At every call site of the constructor, record:
 
 This is the fastest way to separate a bad packet layout from a wrong endpoint/source-port choice.
 
-## D. Compare against the retail packet
+## E. Compare against the retail packet
 
 Run the real Android client once and capture only the first UDP datagram to the game endpoint.
 Do not decrypt anything. Compare:
@@ -53,7 +61,7 @@ Do not decrypt anything. Compare:
 If the Python packet differs, send the two hex prefixes and the four values above. That is enough
 to fix the serializer without needing any account material.
 
-## E. Only after Reply1 works
+## F. Only after Reply1 works
 
 Then move to:
 - Request2 constructor
