@@ -1,33 +1,29 @@
-"""Small standard RakNet connection-negotiation client.
+"""Roblox's current offline RakNet-style connection handshake.
 
-This is only the standard RakNet offline/online connection setup. It does not
-implement Roblox's encrypted application session.
+This is not vanilla RakNet connection negotiation. The current Roblox client uses
+RbxOpenRequest1/Reply1 (0x7B/0x7E) followed by encrypted RbxOpenRequest2/Reply2
+(0x78/0x7D).
+
+The Request2 serializer and SessionCrypto state machine are still being completed,
+so this module currently brings the connection up only through Reply1.
 """
 
 from __future__ import annotations
 
 import os
 import socket
-import struct
-import time
 from dataclasses import dataclass
 
 MAGIC = bytes.fromhex("00ffff00fefefefefdfdfdfd12345678")
 
-ID_UNCONNECTED_PING = 0x01
-ID_OPEN_CONNECTION_REQUEST_1 = 0x05
-ID_OPEN_CONNECTION_REPLY_1 = 0x06
-ID_OPEN_CONNECTION_REQUEST_2 = 0x07
-ID_OPEN_CONNECTION_REPLY_2 = 0x08
-ID_CONNECTION_REQUEST = 0x09
-ID_CONNECTION_REQUEST_ACCEPTED = 0x10
-ID_NEW_INCOMING_CONNECTION = 0x13
-ID_ALREADY_CONNECTED = 0x12
-ID_CONNECTION_BANNED = 0x17
-ID_INCOMPATIBLE_PROTOCOL = 0x19
+ID_RBX_OPEN_REQUEST_1 = 0x7B
+ID_RBX_OPEN_REPLY_1 = 0x7E
+ID_RBX_OPEN_REQUEST_2 = 0x78
+ID_RBX_OPEN_REPLY_2 = 0x7D
 
-DEFAULT_PROTOCOL = 11
+RBX_OPEN_PROTOCOL = 5
 DEFAULT_MTU = 1492
+REQUEST1_LEN = DEFAULT_MTU - 40
 
 
 class RakNetError(RuntimeError):
@@ -35,20 +31,8 @@ class RakNetError(RuntimeError):
 
 
 @dataclass(frozen=True)
-class HandshakeResult:
-    server_guid: int
-    mtu: int
-    use_encryption: bool
-
-
-def _ipv4_address(host: str, port: int) -> bytes:
-    try:
-        octets = [int(part) for part in host.split(".")]
-    except ValueError as exc:
-        raise RakNetError("UDMUX endpoint must currently be an IPv4 address") from exc
-    if len(octets) != 4 or any(not 0 <= x <= 255 for x in octets):
-        raise RakNetError("invalid IPv4 endpoint")
-    return b"\x04" + bytes(octets) + struct.pack(">H", port)
+class RbxOpenReply1:
+    raw: bytes
 
 
 class RakNetClient:
@@ -58,14 +42,13 @@ class RakNetClient:
         port: int,
         *,
         timeout: float = 4.0,
-        protocol: int = DEFAULT_PROTOCOL,
         mtu: int = DEFAULT_MTU,
     ):
         self.endpoint = (host, int(port))
         self.timeout = timeout
-        self.protocol = protocol
-        self.mtu = mtu
-        self.guid = int.from_bytes(os.urandom(8), "big")
+        self.mtu = int(mtu)
+        if self.mtu < 576:
+            raise ValueError("MTU must be at least 576")
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.settimeout(timeout)
 
@@ -76,167 +59,73 @@ class RakNetClient:
         try:
             data, _ = self.sock.recvfrom(65535)
         except socket.timeout as exc:
-            raise RakNetError("timeout waiting for a RakNet response") from exc
+            raise RakNetError("timeout waiting for an RbxOpen reply") from exc
         if not data:
             raise RakNetError("received an empty UDP datagram")
         return data
 
-    def build_unconnected_ping(self) -> bytes:
-        now_ms = int(time.time() * 1000)
-        return (
-            bytes([ID_UNCONNECTED_PING])
-            + struct.pack(">Q", now_ms)
-            + MAGIC
-            + struct.pack(">Q", self.guid)
-        )
-
-    def _open_request_1(self) -> bytes:
-        # ID + magic + protocol byte + zero MTU padding.
-        return (
-            bytes([ID_OPEN_CONNECTION_REQUEST_1])
-            + MAGIC
-            + bytes([self.protocol & 0xFF])
-            + bytes(max(0, self.mtu - 18))
-        )
-
-    def _open_request_2(self, host: str, port: int, mtu: int) -> bytes:
-        return (
-            bytes([ID_OPEN_CONNECTION_REQUEST_2])
-            + MAGIC
-            + _ipv4_address(host, port)
-            + struct.pack(">H", mtu)
-            + struct.pack(">Q", self.guid)
-        )
-
-    def _connection_request(self) -> bytes:
-        now_ms = int(time.time() * 1000)
-        return (
-            bytes([ID_CONNECTION_REQUEST])
-            + struct.pack(">Q", self.guid)
-            + struct.pack(">Q", now_ms)
-            + b"\x00"
-        )
+    def build_open_request_1(self) -> bytes:
+        # sub_2897560 is called with MTU - 40. The serializer writes:
+        #   0x7B + 16-byte magic + protocol(5) + Rupp opt-in(0) + zero padding.
+        total = self.mtu - 40
+        prefix = bytes((ID_RBX_OPEN_REQUEST_1,)) + MAGIC + bytes((RBX_OPEN_PROTOCOL, 0))
+        if total < len(prefix):
+            raise RakNetError("requested MTU is too small for RbxOpenRequest1")
+        return prefix + bytes(total - len(prefix))
 
     def probe(self) -> bytes | None:
-        self.sock.sendto(self.build_unconnected_ping(), self.endpoint)
+        """Send RbxOpenRequest1 and return the raw RbxOpenReply1, if any."""
+        self.sock.sendto(self.build_open_request_1(), self.endpoint)
         try:
-            return self._recv()
+            reply = self._recv()
         except RakNetError:
             return None
+        if reply[0] != ID_RBX_OPEN_REPLY_1:
+            return reply
+        if len(reply) < 17 or reply[1:17] != MAGIC:
+            raise RakNetError("RbxOpenReply1 has an invalid magic value")
+        return reply
 
-    def connect(self, *, trace: bool = False) -> HandshakeResult:
-        host, port = self.endpoint
-
-        ping = self.build_unconnected_ping()
+    def connect(self, *, trace: bool = False) -> RbxOpenReply1:
+        request1 = self.build_open_request_1()
         if trace:
-            print(f"UDP -> UNCONNECTED_PING len={len(ping)}")
-        self.sock.sendto(ping, self.endpoint)
-        pong = self._recv()
-        if trace:
-            print(f"UDP <- packet=0x{pong[0]:02x} len={len(pong)} hex={pong[:64].hex()}")
-        if pong[0] != 0x1C or MAGIC not in pong:
-            raise RakNetError(f"expected UNCONNECTED_PONG 0x1c, got 0x{pong[0]:02x}")
-
-        request1 = self._open_request_1()
-        if trace:
-            print(f"UDP -> OPEN_CONNECTION_REQUEST_1 len={len(request1)}")
+            print(
+                f"UDP -> RbxOpenRequest1 0x{ID_RBX_OPEN_REQUEST_1:02x} "
+                f"len={len(request1)}"
+            )
         self.sock.sendto(request1, self.endpoint)
-        reply1 = self._recv()
+
+        reply = self._recv()
         if trace:
-            print(f"UDP <- packet=0x{reply1[0]:02x} len={len(reply1)} hex={reply1[:64].hex()}")
-        if reply1[0] != ID_OPEN_CONNECTION_REPLY_1:
-            raise RakNetError(f"expected 0x06, got 0x{reply1[0]:02x}")
-        if len(reply1) < 28 or reply1[1:17] != MAGIC:
-            raise RakNetError("malformed OPEN_CONNECTION_REPLY_1")
+            print(
+                f"UDP <- RbxOpenReply1 0x{reply[0]:02x} "
+                f"len={len(reply)} hex={reply[:128].hex()}"
+            )
 
-        server_guid = struct.unpack(">Q", reply1[17:25])[0]
-        use_security = bool(reply1[25])
-        reply_mtu = struct.unpack(">H", reply1[26:28])[0]
-        mtu = min(self.mtu, reply_mtu or self.mtu)
+        if reply[0] != ID_RBX_OPEN_REPLY_1:
+            raise RakNetError(
+                f"expected RbxOpenReply1 0x{ID_RBX_OPEN_REPLY_1:02x}, "
+                f"got 0x{reply[0]:02x}"
+            )
+        if len(reply) < 17 or reply[1:17] != MAGIC:
+            raise RakNetError("malformed RbxOpenReply1")
 
-        request2 = self._open_request_2(host, port, mtu)
-        if trace:
-            print(f"UDP -> OPEN_CONNECTION_REQUEST_2 len={len(request2)}")
-        self.sock.sendto(request2, self.endpoint)
-        reply2 = self._recv()
-        if trace:
-            print(f"UDP <- packet=0x{reply2[0]:02x} len={len(reply2)} hex={reply2[:64].hex()}")
-        if reply2[0] != ID_OPEN_CONNECTION_REPLY_2:
-            raise RakNetError(f"expected 0x08, got 0x{reply2[0]:02x}")
-        if len(reply2) < 1 + 16 + 8 + 7 + 2 + 1 or reply2[1:17] != MAGIC:
-            raise RakNetError("malformed OPEN_CONNECTION_REPLY_2")
+        return RbxOpenReply1(raw=reply)
 
-        # Roblox's custom OPEN_CONNECTION_REPLY_2 layout:
-        #   id | magic | server GUID | external address | MTU | useSecurity
-        #      | supportedVersion(u32) | capabilities(u64)
-        use_encryption = bool(reply2[-1])
-        request = self._connection_request()
-        if trace:
-            print(f"UDP -> CONNECTION_REQUEST len={len(request)} hex={request.hex()}")
-        self.sock.sendto(request, self.endpoint)
-
-        deadline = time.monotonic() + self.timeout
-        while time.monotonic() < deadline:
-            try:
-                packet = self._recv()
-            except RakNetError:
-                continue
-            code = packet[0]
-            if trace:
-                print(f"UDP <- packet=0x{code:02x} len={len(packet)} hex={packet[:128].hex()}")
-            if code == ID_CONNECTION_REQUEST_ACCEPTED:
-                result = HandshakeResult(server_guid, mtu, use_encryption or use_security)
-                if trace:
-                    self._trace_post_handshake()
-                return result
-            if code == ID_NEW_INCOMING_CONNECTION:
-                result = HandshakeResult(server_guid, mtu, use_encryption or use_security)
-                if trace:
-                    self._trace_post_handshake()
-                return result
-            if code in (
-                ID_ALREADY_CONNECTED,
-                ID_CONNECTION_BANNED,
-                ID_INCOMPATIBLE_PROTOCOL,
-            ):
-                raise RakNetError(f"server rejected connection with packet 0x{code:02x}")
-
-        raise RakNetError("timeout waiting for connection acceptance")
-
-
-
-    def _trace_post_handshake(self, seconds: float = 2.0) -> None:
-        """Observe raw packets immediately after RakNet accepts the connection."""
-        deadline = time.monotonic() + seconds
-        previous_timeout = self.sock.gettimeout()
-        try:
-            while time.monotonic() < deadline:
-                remaining = max(0.05, deadline - time.monotonic())
-                self.sock.settimeout(min(previous_timeout or remaining, remaining))
-                try:
-                    packet = self._recv()
-                except RakNetError:
-                    break
-                print(
-                    f"UDP <- post-handshake packet=0x{packet[0]:02x} "
-                    f"len={len(packet)} hex={packet[:128].hex()}"
-                )
-        finally:
-            self.sock.settimeout(previous_timeout)
 
 def _selftest() -> None:
     client = RakNetClient("127.0.0.1", 1234)
     try:
-        ping = client.build_unconnected_ping()
-        assert ping[0] == ID_UNCONNECTED_PING
-        request1 = client._open_request_1()
-        assert len(request1) == DEFAULT_MTU
+        request1 = client.build_open_request_1()
+        assert len(request1) == REQUEST1_LEN
+        assert request1[0] == ID_RBX_OPEN_REQUEST_1
         assert request1[1:17] == MAGIC
-        assert request1[0] == ID_OPEN_CONNECTION_REQUEST_1
-        request2 = client._open_request_2("127.0.0.1", 1234, DEFAULT_MTU)
-        assert request2[0] == ID_OPEN_CONNECTION_REQUEST_2
-        assert request2[1:17] == MAGIC
-        assert len(request2) == 46
+        assert request1[17] == RBX_OPEN_PROTOCOL
+        assert request1[18] == 0
+        assert request1[19:] == bytes(len(request1) - 19)
+        assert ID_RBX_OPEN_REPLY_1 == 0x7E
+        assert ID_RBX_OPEN_REQUEST_2 == 0x78
+        assert ID_RBX_OPEN_REPLY_2 == 0x7D
     finally:
         client.close()
     print("[raknet] selftest OK")

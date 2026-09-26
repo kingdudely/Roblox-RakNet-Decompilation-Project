@@ -1,19 +1,22 @@
-"""My decoder for Roblox's RakNet-over-UDMUX protocol.
+"""Python tooling for Roblox RakNet/session reverse-engineering.
 
-I reverse-engineered the outer framing and AEAD from live captures. Hand it a
-session key for a direction and it decodes real traffic. It leans on
-`cryptography` and the stdlib, nothing else. Getting the key yourself is your
-problem, I don't do that part here.
-
-    from rbxraknet import parse, AeadCodec, AES, CHACHA
-    dg = parse(raw_udp_payload)
-    plaintext, counter = AeadCodec(key, AES).decrypt(dg)
+The live bring-up currently stops after RbxOpenReply1. The capture-decoder
+modules are retained independently for previously recovered UDMUX traffic.
 """
+
 from .framing import Datagram, parse
 from .aead import AeadCodec, AES, CHACHA, COUNTER_BASE, SALT, nonce, counter_candidates
 
 __all__ = [
-    "Datagram", "parse",
-    "AeadCodec", "AES", "CHACHA", "COUNTER_BASE", "SALT", "nonce", "counter_candidates",
+    "Datagram",
+    "parse",
+    "AeadCodec",
+    "AES",
+    "CHACHA",
+    "COUNTER_BASE",
+    "SALT",
+    "nonce",
+    "counter_candidates",
 ]
-__version__ = "0.1.0"
+
+__version__ = "0.2.0"

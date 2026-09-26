@@ -1,11 +1,14 @@
-"""Minimal Roblox RakNet join/bring-up client.
+"""Minimal Roblox GameJoin + current RbxOpenRequest1 bring-up client.
 
-Implemented stages:
-    .ROBLOSECURITY -> X-CSRF -> auth ticket -> GameJoin joinScript
-    -> local X25519 -> X25519(shared) -> SHA512(shared || pubs)
+Implemented:
+    .ROBLOSECURITY -> X-CSRF -> auth ticket -> GameJoin
+    -> local X25519 -> EphemeralEarlyPubKey
+    -> current RbxOpenRequest1 (0x7B) with Rupp opt-in disabled
+    -> raw RbxOpenReply1 (0x7E)
 
-The exact AEAD key split/epoch KDF and Rupp token generator remain unresolved
-in the current fork, so this module does not invent them.
+Request2 (0x78), SessionCrypto key establishment, and Reply2 (0x7D)
+remain intentionally unimplemented until their remaining serialized fields
+are represented exactly.
 """
 
 from __future__ import annotations
@@ -18,10 +21,10 @@ import json
 import os
 import sys
 import uuid
-from urllib.parse import unquote
 from dataclasses import dataclass
 from typing import Any
 from urllib.error import HTTPError, URLError
+from urllib.parse import unquote
 from urllib.request import Request, urlopen
 
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey, X25519PublicKey
@@ -36,18 +39,21 @@ DEFAULT_KEY_VERSION = 5
 
 
 def _b64decode(value: str) -> bytes:
-    # GameJoin can return this base64 value inside a URL-escaped joinScript.
-    # Decode percent escapes first; do not use unquote_plus because '+' is valid
-    # inside ordinary base64.
     value = unquote(value.strip())
     padded = value + "=" * (-len(value) % 4)
     return base64.b64decode(padded, validate=True)
 
 
-def _http(url: str, *, cookie: str | None = None, csrf: str | None = None,
-          ticket: str | None = None, negotiation: bool = False,
-          method: str = "POST",
-          body: bytes | None = None) -> tuple[int, dict[str, str], bytes]:
+def _http(
+    url: str,
+    *,
+    cookie: str | None = None,
+    csrf: str | None = None,
+    ticket: str | None = None,
+    negotiation: bool = False,
+    method: str = "POST",
+    body: bytes | None = None,
+) -> tuple[int, dict[str, str], bytes]:
     headers = {
         "User-Agent": "Roblox/WinInet",
         "Accept": "application/json",
@@ -68,9 +74,17 @@ def _http(url: str, *, cookie: str | None = None, csrf: str | None = None,
     request = Request(url, data=body, headers=headers, method=method)
     try:
         with urlopen(request, timeout=20) as response:
-            return response.status, {k.lower(): v.strip() for k, v in response.headers.items()}, response.read()
+            return (
+                response.status,
+                {k.lower(): v.strip() for k, v in response.headers.items()},
+                response.read(),
+            )
     except HTTPError as exc:
-        return exc.code, {k.lower(): v.strip() for k, v in exc.headers.items()}, exc.read()
+        return (
+            exc.code,
+            {k.lower(): v.strip() for k, v in exc.headers.items()},
+            exc.read(),
+        )
     except URLError as exc:
         raise RuntimeError(f"HTTP request failed: {exc.reason}") from exc
 
@@ -151,10 +165,16 @@ class RobloxJoinClient:
             raise ValueError("ROBLOSECURITY is empty")
         self.cookie = cookie
 
-    def join(self, place_id: int, *, job_id: str | None = None,
-             public_key_version: int = DEFAULT_KEY_VERSION) -> JoinResult:
+    def join(
+        self,
+        place_id: int,
+        *,
+        job_id: str | None = None,
+        public_key_version: int = DEFAULT_KEY_VERSION,
+    ) -> JoinResult:
         private = X25519PrivateKey.generate()
         local_public = private.public_key().public_bytes_raw()
+
         csrf = get_csrf(self.cookie)
         auth_ticket = get_authentication_ticket(self.cookie, csrf)
 
@@ -165,8 +185,12 @@ class RobloxJoinClient:
             "placeId": place_id,
             "isTeleport": False,
             "gameJoinAttemptId": str(uuid.uuid4()),
-            "ClientPublicKeyData": make_client_public_key_data(local_public, public_key_version),
+            "ClientPublicKeyData": make_client_public_key_data(
+                local_public,
+                public_key_version,
+            ),
         }
+
         endpoint = JOIN_GAME_URL
         if job_id:
             body["gameId"] = job_id
@@ -188,7 +212,8 @@ class RobloxJoinClient:
         response = json.loads(raw)
         if response.get("status") not in (None, 2):
             raise RuntimeError(
-                f"GameJoin status={response.get('status')}: {response.get('message', '')}"
+                f"GameJoin status={response.get('status')}: "
+                f"{response.get('message', '')}"
             )
 
         join_script = response.get("joinScript") or {}
@@ -201,9 +226,6 @@ class RobloxJoinClient:
 
         peer_encoded = str(peer_encoded)
         peer_public = _b64decode(peer_encoded)
-
-        # Always expose the exact GameJoin value when the shape is unexpected.
-        # This is a public key field, not the account cookie or authentication ticket.
         if len(peer_public) != 32:
             details = (
                 f"{len(peer_public)} bytes (expected 32); "
@@ -214,10 +236,18 @@ class RobloxJoinClient:
                     f"; first32={peer_public[:32].hex()}"
                     f"; last32={peer_public[-32:].hex()}"
                 )
-            raise RuntimeError("EphemeralEarlyPubKey decoded unexpectedly: " + details)
+            raise RuntimeError(
+                "EphemeralEarlyPubKey decoded unexpectedly: " + details
+            )
 
-        shared = private.exchange(X25519PublicKey.from_public_bytes(peer_public))
-        digest = hashlib.sha512(shared + local_public + peer_public).digest()
+        shared = private.exchange(
+            X25519PublicKey.from_public_bytes(peer_public)
+        )
+        # This is the existing GameJoin-side transcript calculation. It is not
+        # claimed here to be the final SessionCrypto AEAD key.
+        digest = hashlib.sha512(
+            shared + local_public + peer_public
+        ).digest()
 
         return JoinResult(
             join_script=join_script,
@@ -240,8 +270,6 @@ def print_join_summary(result: JoinResult) -> None:
     for endpoint in result.endpoints:
         print(f"    {endpoint[0]}:{endpoint[1]}")
 
-    # EphemeralEarlyPubKey is public session material; print the exact value
-    # and the decoded bytes so the join-script representation is observable.
     encoded = str(js.get("EphemeralEarlyPubKey", ""))
     decoded = result.peer_public_key
     print("EphemeralEarlyPubKey:")
@@ -249,11 +277,10 @@ def print_join_summary(result: JoinResult) -> None:
     print(f"  decoded length: {len(decoded)} bytes")
     print(f"  decoded hex: {decoded.hex()}")
 
-    print(f"X25519: OK ({len(result.shared_secret)} bytes)")
-    print(f"SHA-512: OK ({len(result.sha512_digest)} bytes)")
-    print("AEAD key split: unresolved")
-    print("Epoch rekey: unresolved")
-    print("Rupp token generator: unresolved")
+    print(f"X25519 join stage: OK ({len(result.shared_secret)} bytes)")
+    print(f"SHA-512 join transcript: OK ({len(result.sha512_digest)} bytes)")
+    print("RbxOpenRequest1 Rupp opt-in: disabled")
+    print("SessionCrypto Request2: not implemented yet")
 
 
 def read_cookie() -> str:
@@ -266,23 +293,47 @@ def read_cookie() -> str:
         source = "prompt"
 
     if cookie:
-        # Confirm that input was captured without ever echoing the credential.
-        preview = cookie[:4] + "..." + cookie[-4:] if len(cookie) >= 8 else "*" * len(cookie)
-        print(f"ROBLOSECURITY captured ({source}): {preview} [length={len(cookie)}]")
+        preview = (
+            cookie[:4] + "..." + cookie[-4:]
+            if len(cookie) >= 8
+            else "*" * len(cookie)
+        )
+        print(
+            f"ROBLOSECURITY captured ({source}): "
+            f"{preview} [length={len(cookie)}]"
+        )
     else:
         print("ROBLOSECURITY captured: EMPTY", file=sys.stderr)
     return cookie
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Minimal Roblox web-join + RakNet bring-up")
+    parser = argparse.ArgumentParser(
+        description="Roblox GameJoin + current RbxOpenRequest1 bring-up"
+    )
     parser.add_argument("--place-id", type=int, required=True)
     parser.add_argument("--job-id")
     parser.add_argument("--key-version", type=int, default=DEFAULT_KEY_VERSION)
-    parser.add_argument("--show-ephemeral", action="store_true", help="print EphemeralEarlyPubKey and decoded public bytes for diagnosis")
-    parser.add_argument("--probe", action="store_true", help="send a RakNet unconnected ping")
-    parser.add_argument("--handshake", action="store_true", help="run standard RakNet connection negotiation")
-    parser.add_argument("--udp-trace", action="store_true", help="run the real UDP handshake and dump raw post-handshake packets")
+    parser.add_argument(
+        "--show-ephemeral",
+        action="store_true",
+        help="print the EphemeralEarlyPubKey and decoded public bytes",
+    )
+    parser.add_argument(
+        "--probe",
+        action="store_true",
+        help="send RbxOpenRequest1 and report RbxOpenReply1",
+    )
+    parser.add_argument(
+        "--handshake",
+        action="store_true",
+        help="run the current Roblox offline handshake through Reply1",
+    )
+    parser.add_argument(
+        "--udp-trace",
+        action="store_true",
+        help="print raw Request1/Reply1 packet data",
+    )
     args = parser.parse_args(argv)
 
     cookie = read_cookie()
@@ -310,38 +361,23 @@ def main(argv: list[str] | None = None) -> int:
             raw = _b64decode(encoded)
             print(f"  decoded length: {len(raw)} bytes")
             print(f"  decoded hex: {raw.hex()}")
-            if len(raw) >= 3:
-                print(f"  first 3 bytes: {raw[:3].hex()}")
-                print(f"  last 3 bytes:  {raw[-3:].hex()}")
         except Exception as exc:
             print(f"  base64 decode failed: {exc}")
 
     if not result.endpoints:
         return 0 if not (args.probe or args.handshake or args.udp_trace) else 2
 
-    if args.probe:
+    if args.probe or args.handshake or args.udp_trace:
         client = RakNetClient(*result.endpoints[0])
         try:
-            data = client.probe()
-            if data is None:
-                print("UDP probe: no response")
-                return 2
-            print(
-                f"UDP probe: response len={len(data)} first=0x{data[0]:02x}"
-            )
-        finally:
-            client.close()
-
-    if args.handshake or args.udp_trace:
-        client = RakNetClient(*result.endpoints[0])
-        try:
-            hs = client.connect(trace=args.udp_trace)
-            print("RakNet handshake: OK")
-            print(f"  server GUID: 0x{hs.server_guid:016x}")
-            print(f"  MTU: {hs.mtu}")
-            print(f"  encryption flag: {hs.use_encryption}")
+            reply = client.connect(trace=args.udp_trace)
+            print("RbxOpen handshake: Reply1 received")
+            print(f"  packet id: 0x{reply.raw[0]:02x}")
+            print(f"  packet length: {len(reply.raw)}")
+            if args.udp_trace:
+                print(f"  packet hex: {reply.raw[:256].hex()}")
         except RakNetError as exc:
-            print(f"RakNet handshake: FAILED: {exc}", file=sys.stderr)
+            print(f"RbxOpen handshake: FAILED: {exc}", file=sys.stderr)
             return 2
         finally:
             client.close()

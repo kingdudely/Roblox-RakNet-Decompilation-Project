@@ -1,85 +1,261 @@
-# rbxraknet
+# Roblox RakNet / SessionCrypto RE
 
-Decodes Roblox's RakNet-over-UDMUX game traffic, from the outer datagram framing through the
-AEAD envelope (cipher, keys, nonce) down to the inner RakNet reliability and replication
-grammar. There are also notes on the web join flow and the client-side session/token setup.
+Python-only working branch for reverse-engineering the current Roblox RakNet connection/session path.
 
-Everything works off a capture from your own client, the same idea as a Wireshark dissector. It
-doesn't connect to Roblox, doesn't log in, and isn't a game client or a cheat. Session keys are
-per-connection and aren't included. Don't use any of this to break Roblox's ToS.
+Target build:
+- Roblox Player: 9.4.260915.1d72b8c0
+- Branch: python
 
-## What's here
+This repository contains the Python tooling and the protocol notes that are currently supported by the code. The reverse-engineering conclusions below are based on IDA analysis of the target client, not on assumptions about vanilla RakNet.
 
-| Path | What |
+## Current state
+
+The web join stage works:
+
+1. Obtain an authentication ticket.
+2. Call GameJoin.
+3. Read `UdmuxEndpoints`.
+4. Generate a local X25519 key pair.
+5. Decode `EphemeralEarlyPubKey`.
+6. Compute the join-stage X25519 shared secret.
+7. Compute the existing SHA-512 join transcript used by the Python bring-up code.
+
+The UDP connection path has been corrected from vanilla RakNet to Roblox's current offline handshake.
+
+The current packet IDs are:
+
+| ID | Name |
 |---|---|
-| `python/rbxraknet/` | The reference decoder. Framing, AEAD, inner grammar. Only needs `cryptography`, and has a CLI. |
-| `cpp/decoder/` | The same decoder as a C++/OpenSSL library, with CMake and unit tests. |
-| `cpp/headless_join.cpp` | Sketch of the whole flow from web join to ECDH to decrypt. The KDF and packet-token stages remain incomplete. |
-| `docs/WEB_JOIN_FLOW.md` | The HTTPS join flow, the X25519 exchange, the KDF findings, and the Rupp token path. |
-| `docs/INNER_PROTOCOL.md` | The inner RakNet grammar, with the byte-level evidence. |
-| `docs/PROVENANCE.md` | What's measured vs inferred, including the latest IDA reverse-engineering findings. |
+| `0x7B` | RbxOpenRequest1 |
+| `0x7E` | RbxOpenReply1 |
+| `0x78` | RbxOpenRequest2 |
+| `0x7D` | RbxOpenReply2 |
 
-## Quick start (Python)
+The vanilla sequence beginning with `0x01` UNCONNECTED_PING and `0x05` OPEN_CONNECTION_REQUEST_1 is not the current Roblox path being implemented here.
+
+## RbxOpenRequest1
+
+IDA shows `sub_2897560` constructing:
+
+```text
+byte 0       0x7B
+bytes 1..16  00 FF FF 00 FE FE FE FE FD FD FD FD 12 34 56 78
+byte 17      0x05
+byte 18      Rupp opt-in
+padding      zeroes
+```
+
+The magic is stored in `xmmword_64E2A50`.
+
+The real client normally sets the Rupp opt-in byte to `1`, but `sub_28979D0` explicitly handles the `0` case and logs:
 
 ```
+Client did not opt in to receiving Rupp headers. Omitting Rupp header.
+```
+
+The Python client therefore sends `0` at byte 18. This disables the server's Rupp response-header opt-in path.
+
+The constructor is called with `MTU - 40`; for the current default MTU of 1492 this makes the UDP payload 1452 bytes.
+
+## RbxOpenReply1
+
+The dispatcher identifies `0x7E` as RbxOpenReply1 and the client parser is `sub_2897F00`.
+
+The reply is the next packet required before constructing Request2. Its complete field semantics are intentionally not guessed in the Python client yet; the bring-up code records the raw reply.
+
+## Request2 encryption
+
+Request2 is not vanilla RakNet OpenConnectionRequest2.
+
+The client constructor is `sub_2898470`.
+
+It first creates an offline/Rupp prefix with `sub_289FC80`. That prefix is the clear authenticated-data region. We do not need to understand the Rupp semantics to reason about the AEAD layout, and the Python branch currently treats that portion as an unresolved serialization task.
+
+The server-side parser `sub_28994F0` confirms that the authenticated-data length is read before decryption and rejects an AAD length below `0x35`.
+
+The encrypted body begins with the fields written by `sub_2898470`, including:
+
+```text
+0x78
+RakNet magic
+0x03
+0x00
+two 16-bit fields
+32-byte public key
+additional negotiated/session fields
+```
+
+The exact bit-level serialization of every later field is still being implemented from the IDA evidence.
+
+## SessionCrypto AEAD
+
+The current SessionCrypto cipher path is ChaCha20-Poly1305.
+
+This is directly established by:
+
+- `sub_28C4E90` constructing the ChaCha20 state with `"expand 32-byte k"` and counter 0.
+- `sub_28C5070` constructing the same state and encrypting with counter 1.
+- `sub_28C5A80` applying the Poly1305 26-bit limb/clamping masks.
+- `sub_28C5640` implementing the Poly1305 multiplication/reduction.
+- `sub_28C5440` finalizing the 16-byte Poly1305 tag.
+
+The AEAD layout is:
+
+```text
+AAD / offline-Rupp prefix
+encrypted Request2 body
+12-byte nonce
+16-byte Poly1305 tag
+```
+
+The decryptor `sub_28BA1D0` subtracts exactly 28 bytes from the packet size. `sub_57DF050` receives the ciphertext, AAD length, nonce area and tag area.
+
+The Poly1305 input is:
+
+```text
+AAD
+zero padding to 16
+ciphertext
+zero padding to 16
+LE64(AAD length)
+LE64(ciphertext length)
+```
+
+## Nonce
+
+`sub_28BA070` writes the 12-byte nonce as:
+
+```text
+LE64(counter + 0x754E657571696E55)
+6D 62 65 52
+```
+
+The constants decode to:
+
+```text
+"UniqueNu" + "mbeR"
+```
+
+so the nonce is:
+
+```text
+LE64(UniqueNumber-derived counter) || b"mbeR"
+```
+
+The exact initial value and counter lifetime belong to SessionCrypto state and are still being traced.
+
+## SessionCrypto key derivation
+
+`sub_28DD1B0` allocates a 352-byte SessionCrypto workspace.
+
+The first fields are:
+
+| Offset | Size | Current interpretation |
+|---|---:|---|
+| `+0x00` | 32 | local X25519 public key |
+| `+0x20` | 32 | local X25519 private/scalar |
+| `+0x40` | 32 | key-exchange input |
+| `+0x60` | 32 | key-exchange input |
+| `+0x80` | 32 | second key-exchange input |
+| `+0xA0` | 32 | second key-exchange input |
+| `+0xC0` | 32 | derived key 1 |
+| `+0xE0` | 32 | derived key 2 |
+| `+0x100` | 32 | derived key 3 |
+| `+0x120` | 32 | derived key 4 |
+
+`sub_28D0EB0` performs the X25519 scalar clamping and public-key generation.
+
+`sub_28C0E30` performs an X25519 operation followed by SHA-512 based derivation and splits its 64-byte result into two 32-byte outputs. The exact argument-to-field interpretation is still being pinned down; the Python branch does not label the resulting digest halves as final SessionCrypto keys.
+
+`sub_28BA4D0` supplies four 32-byte key-exchange values. Its `a2 == 0` path uses built-in values; the nonzero path loads dynamically supplied values. The current Request2 constructor starts with its key-exchange flag at zero, so the Python bring-up does not enable the dynamic path.
+
+## Rupp
+
+Rupp is deliberately not being fully implemented yet.
+
+There are two distinct cases:
+
+- Request1 Rupp opt-in can be disabled by sending byte 18 as `0`.
+- Request2 still creates an offline/Rupp-derived authenticated-data prefix through `sub_289FC80`.
+
+The first case is disabled in the Python client. The second is currently treated as an opaque AAD serialization problem rather than expanding the implementation with token semantics that are not yet required.
+
+## Reply2
+
+`sub_289BDF0` is the client-side RbxOpenReply2 parser.
+
+`sub_289B300` is the server-side RbxOpenReply2 constructor/sender reached after successful Request2 processing.
+
+The full Reply2 field model is not yet implemented in Python.
+
+## Python layout
+
+```text
+python/
+  rbxraknet/
+    __init__.py
+    aead.py       # existing UDMUX capture AEAD decoder
+    client.py     # GameJoin + current offline handshake bring-up
+    decode.py     # capture decoder CLI
+    framing.py    # outer UDMUX framing
+    inner.py      # inner RakNet grammar
+    raknet.py     # current Roblox offline-handshake transport
+  tests/
+    test_client.py
+  requirements.txt
+```
+
+The existing `aead.py`/capture-decoder code is separate from the SessionCrypto preauth path described above. It is retained because it handles the repository's previously decoded UDMUX gameplay captures.
+
+## Install
+
+```bash
 cd python
-pip install -r requirements.txt          # just: cryptography
-python -m rbxraknet.decode --capture cap.hex --key-17 <hex> --key-1f <hex>
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install -r requirements.txt
 ```
 
-`cap.hex` is one hex UDP payload per line. Keys are per-direction, 32-byte AES-256-GCM. The
-library API, the wire layout, and test coverage are in `python/README.md`.
+## Bring-up
 
-## Reverse-engineering status
+Set `ROBLOSECURITY`, then:
 
-The current IDA work targets Roblox client build `9.4.260915.1d72b8c0`.
-
-The session-crypto path is now substantially identified:
-
-- `sub_28DD1B0` creates a 352-byte crypto workspace and generates the local X25519 key pair.
-- `sub_28D0EB0` clamps the 32-byte scalar and performs the X25519-style public-key ladder.
-- `sub_28B9FD0` receives the 32-byte peer public key and calls `sub_28C0B20`.
-- `sub_28C0B20` performs the X25519 ECDH operation and then runs a SHA-512 based derivation over the shared secret plus the local and peer public keys. The exact downstream interpretation/splitting of its 64-byte digest is still being traced.
-- `sub_28BA1D0` / `sub_28DD510` feed the resulting crypto state into the AES-GCM packet path.
-
-The Rupp packet-token path is also mapped farther than the original public notes:
-
-```
-joinScript TokenValue
-    -> sub_11D5AA0
-    -> 16-byte value
-    -> sub_2277EA0
-    -> Rupp token state
-
-Rupp send path
-    -> sub_2275560
-    -> sub_2275400
-    -> object at a1+0x40
-    -> vtable + 0x10
-    -> 16-byte generated token
-    -> sub_2275C70
-    -> Rupp header
+```bash
+python -m rbxraknet.client --place-id YOUR_PLACE_ID --handshake
 ```
 
-The client exposes configuration metadata named `SetTokenValue`, `SetTokenGenAlgo`, and
-`SetTokenPepper`. Their reflection-registration wrappers are known, but the concrete token
-generator implementation that consumes the configured values is still being located.
+The current handshake command performs GameJoin, sends RbxOpenRequest1 with Rupp opt-in disabled, and waits for RbxOpenReply1. It does not pretend that Request2 or the full Roblox session is implemented.
+
+For packet tracing:
+
+```bash
+python -m rbxraknet.client --place-id YOUR_PLACE_ID --handshake --udp-trace
+```
 
 ## Status
 
-Verified against a live session. The outer framing round-trips losslessly across 16,797
-payloads. The AEAD is AES-256-GCM in both directions, the nonce is `LE64(counter) || "mbeR"`,
-and the AAD is empty. The inner grammar tiles 100% in both directions. Property and event values
-aren't decoded yet. They need the class schema that comes down in `ID_NEW_SCHEMA`.
+Implemented and supported by IDA evidence:
 
-The remaining work for a self-contained headless transport is concentrated in two areas:
+- GameJoin endpoint discovery.
+- Local X25519 generation.
+- RbxOpenRequest1 `0x7B`.
+- Request1 magic and protocol `5`.
+- Request1 Rupp opt-in disable.
+- RbxOpenReply1 detection `0x7E`.
+- Request2/Reply2 packet IDs.
+- ChaCha20-Poly1305 primitive.
+- 12-byte SessionCrypto nonce construction.
+- 28-byte nonce+tag trailer.
+- SHA-512/X25519 SessionCrypto derivation structure.
+- SessionCrypto workspace layout at the currently identified fields.
 
-1. Finish the client-side KDF, including the exact output/key split and epoch rekey derivation.
-2. Finish the Rupp packet-token generator, including how `TokenGenAlgorithm` and `PepperId`
-   feed the 16-byte token.
+Not yet implemented:
 
-See `docs/PROVENANCE.md` and `docs/WEB_JOIN_FLOW.md` for the build-specific evidence.
+- Exact offline-Rupp AAD serialization in Python.
+- Complete Request2 field serializer.
+- Exact SessionCrypto key-field interpretation after the second-stage exchange.
+- Exact initial UniqueNumber counter state.
+- RbxOpenReply2 serializer/parser in Python.
+- Post-Reply2 RakNet reliability/session traffic for the live client.
 
-## License
-
-MIT. See `LICENSE`.
+The branch intentionally stops at the last point that can be represented honestly from the current reverse-engineering evidence.
